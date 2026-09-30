@@ -1,0 +1,59 @@
+{
+  "name": "color-mix-lab",
+  "private": true,
+  "version": "0.8.4",
+  "type": "module",
+  "license": "MIT",
+  "description": "Color Mix Lab - vertex colour and ColorMix 3MF preparation tool",
+  "author": "Canopolis",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "build:electron": "tsc -b && vite build --mode electron --outDir dist-electron",
+    "dist:win": "npm run build:electron && electron-builder --win --publish never"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "jszip": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "three": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.184.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.canopolis.colormixlab",
+    "productName": "Color Mix Lab",
+    "files": [
+      "dist-electron/**/*",
+      "electron/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "icon": "electron/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "ColorMixLab-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "ColorMixLab-Portable-${version}.${ext}"
+    }
+  }
+}
