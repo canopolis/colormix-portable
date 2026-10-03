@@ -27,6 +27,15 @@ import {
   rgbToHex,
 } from "./core/colour";
 import { printableCeiling, sampleColours } from "./core/filamentAdvisor";
+import {
+  buildTriangleAdjacency,
+  computeZoneMask,
+  countMask,
+  ZONE_NAME_PRESETS,
+  zoneDistance,
+  type ColourZone,
+  type TriangleAdjacency,
+} from "./core/colourZones";
 import { deltaE2000, rgbToLab } from "./core/prusaFdmMixer";
 import { parseObjFile } from "./core/objParser";
 import { medianCutPalette, nearestPaletteIndex } from "./core/quantize";
@@ -1665,6 +1674,37 @@ function averageRgb(colors: RGB[]): RGB {
   return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
 }
 
+let zoneCounter = 0;
+
+function createZone(name: string): ColourZone {
+  zoneCounter += 1;
+  return {
+    id: `zone-${Date.now()}-${zoneCounter}`,
+    name,
+    mode: "connected",
+    points: [],
+    protect: [],
+    tolerance: 12,
+    grow: 0,
+    colour: [200, 60, 60],
+  };
+}
+
+interface HistorySnapshot {
+  adjustments: ColourAdjustments;
+  maxColours: number;
+  colourAssignmentMode: ColourAssignmentMode;
+  maxVirtualMixComponents: 2 | 3;
+  recipeResolution: MixingRecipeResolution;
+  accentProtection: AccentProtectionMode;
+  virtualMixPriority: VirtualMixPriorityMode;
+  mappingStrategy: MappingStrategyMode;
+  colourDifferenceMetric: ColourDifferenceMetric;
+  virtualPreviewLightness: number;
+  skinLock: SkinLockSettings | null;
+  zones: ColourZone[];
+}
+
 function roundRgb(c: RGB): RGB {
   return [Math.round(c[0]), Math.round(c[1]), Math.round(c[2])];
 }
@@ -2232,23 +2272,125 @@ export default function App({
     );
   }, [model, appliedSkinLock, largeModelComputationsDeferred]);
 
+  // Colour zones (optional): nothing changes unless the user applies them.
+  const [zonePickEnabled, setZonePickEnabled] = useState(false);
+  const [zoneClickTarget, setZoneClickTarget] = useState<"point" | "protect">(
+    "point",
+  );
+  const [zones, setZones] = useState<ColourZone[]>([]);
+  const [activeZoneId, setActiveZoneId] = useState<string | null>(null);
+  const [zoneShowSelection, setZoneShowSelection] = useState(true);
+  const [appliedZones, setAppliedZones] = useState<ColourZone[]>([]);
+  const [zoneLastPick, setZoneLastPick] = useState<RGB | null>(null);
+  const [history, setHistory] = useState<HistorySnapshot[]>([]);
+  const adjacencyCacheRef = useRef<{
+    model: MeshModel;
+    adj: TriangleAdjacency;
+  } | null>(null);
+
+  const getAdjacency = useCallback((): TriangleAdjacency | null => {
+    if (!model) return null;
+    const cached = adjacencyCacheRef.current;
+    if (cached && cached.model === model) return cached.adj;
+    const adj = buildTriangleAdjacency(model);
+    adjacencyCacheRef.current = { model, adj };
+    return adj;
+  }, [model]);
+
+  const skinGuardSamples = appliedSkinLock?.samples ?? skinSamples;
+  const zoneWithSkinGuard = useCallback(
+    (zone: ColourZone): ColourZone => {
+      if (skinGuardSamples.length === 0 || zone.points.length === 0)
+        return zone;
+      const seedLab = zone.points.map((p) => rgbToLab(p.rgb));
+      const guard = skinGuardSamples.filter((c) => {
+        const lab = rgbToLab(c);
+        return seedLab.every((s) => zoneDistance(lab, s) > 6);
+      });
+      return guard.length > 0
+        ? { ...zone, protect: [...zone.protect, ...guard] }
+        : zone;
+    },
+    [skinGuardSamples],
+  );
+
+  const appliedZoneOverride = useMemo(() => {
+    if (!model || largeModelComputationsDeferred || appliedZones.length === 0)
+      return null;
+    const owner = new Int32Array(model.triangleColors.length);
+    appliedZones.forEach((zone, zi) => {
+      const mask = computeZoneMask(
+        model.triangleColors,
+        zoneWithSkinGuard(zone),
+        getAdjacency,
+      );
+      for (let i = 0; i < mask.length; i++)
+        if (mask[i] && owner[i] === 0) owner[i] = zi + 1;
+    });
+    return { owner, colours: appliedZones.map((z) => z.colour) };
+  }, [
+    model,
+    appliedZones,
+    largeModelComputationsDeferred,
+    getAdjacency,
+    zoneWithSkinGuard,
+  ]);
+
+  const zoneColourAt = (i: number): RGB | null => {
+    const o = appliedZoneOverride?.owner[i] ?? 0;
+    if (o > 0 && appliedZoneOverride) return appliedZoneOverride.colours[o - 1];
+    if (appliedSkinLock && appliedSkinMask?.[i]) return appliedSkinLock.target;
+    return null;
+  };
+
   const adjustedColors = useMemo(() => {
     if (!model || largeModelComputationsDeferred) return [];
     const base = isDefaultAdjustments(appliedAdjustments)
       ? model.triangleColors
       : model.triangleColors.map((c) => adjustColour(c, appliedAdjustments));
-    if (!appliedSkinLock || !appliedSkinMask) return base;
-    const target = appliedSkinLock.target;
-    return base.map((c, i) => (appliedSkinMask[i] ? target : c));
+    let out = base;
+    if (appliedSkinLock && appliedSkinMask) {
+      const target = appliedSkinLock.target;
+      const skinMask = appliedSkinMask;
+      out = out.map((c, i) => (skinMask[i] ? target : c));
+    }
+    if (appliedZoneOverride) {
+      const { owner, colours } = appliedZoneOverride;
+      out = out.map((c, i) => (owner[i] ? colours[owner[i] - 1] : c));
+    }
+    return out;
   }, [
     model,
     appliedAdjustments,
     largeModelComputationsDeferred,
     appliedSkinLock,
     appliedSkinMask,
+    appliedZoneOverride,
   ]);
 
-  // Live highlight of the pending skin selection (left preview only).
+  const activeZone = zones.find((z) => z.id === activeZoneId) ?? null;
+
+  // Live magenta highlight of the zone being edited (left preview only).
+  const pendingZoneMask = useMemo(() => {
+    if (
+      !model ||
+      !zoneShowSelection ||
+      !activeZone ||
+      activeZone.points.length === 0
+    )
+      return null;
+    return computeZoneMask(
+      model.triangleColors,
+      zoneWithSkinGuard(activeZone),
+      getAdjacency,
+    );
+  }, [model, zoneShowSelection, activeZone, getAdjacency, zoneWithSkinGuard]);
+
+  const pendingZoneCount = useMemo(
+    () => (pendingZoneMask ? countMask(pendingZoneMask) : 0),
+    [pendingZoneMask],
+  );
+
   const pendingSkinMask = useMemo(() => {
     if (!model || !skinShowSelection || skinSamples.length === 0) return null;
     return computeSkinMask(
@@ -2259,19 +2401,63 @@ export default function App({
     );
   }, [model, skinShowSelection, skinSamples, skinProtect, skinTolerance]);
 
-  const skinHighlightColors = useMemo(() => {
-    if (!pendingSkinMask) return adjustedColors;
+  const zoneHighlightColors = useMemo(() => {
+    const mask = pendingZoneMask ?? pendingSkinMask;
+    if (!mask) return adjustedColors;
     const highlight: RGB = [255, 0, 200];
-    return adjustedColors.map((c, i) => (pendingSkinMask[i] ? highlight : c));
-  }, [adjustedColors, pendingSkinMask]);
+    return adjustedColors.map((c, i) => (mask[i] ? highlight : c));
+  }, [adjustedColors, pendingZoneMask, pendingSkinMask]);
 
   const handlePickTriangle = useCallback(
     (triangle: number) => {
-      const rgb = model?.triangleColors[triangle];
-      if (!rgb) return;
-      setSkinLastPick({ triangle, rgb: roundRgb(rgb) });
+      const raw = model?.triangleColors[triangle];
+      if (!raw) return;
+      const rgb = roundRgb(raw);
+      setZoneLastPick(rgb);
+      setStatus(`${t.zoneClickedColour} ${rgbToHex(rgb)}`);
+      const active = zones.find((z) => z.id === activeZoneId);
+      if (zoneClickTarget === "protect") {
+        if (!active) return;
+        setZones((prev) =>
+          prev.map((z) =>
+            z.id === active.id ? { ...z, protect: [...z.protect, rgb] } : z,
+          ),
+        );
+        return;
+      }
+      if (!active) {
+        const zone = createZone(`Zone ${zones.length + 1}`);
+        zone.points = [{ triangle, rgb }];
+        zone.colour = rgb;
+        setZones((prev) => [...prev, zone]);
+        setActiveZoneId(zone.id);
+        return;
+      }
+      setZones((prev) =>
+        prev.map((z) =>
+          z.id === active.id
+            ? {
+                ...z,
+                points: [...z.points, { triangle, rgb }],
+                colour: z.points.length === 0 ? rgb : z.colour,
+              }
+            : z,
+        ),
+      );
     },
-    [model],
+    [model, zones, activeZoneId, zoneClickTarget, setStatus, t],
+  );
+
+  const handlePreviewPick = useCallback(
+    (triangle: number) => {
+      if (skinPickEnabled) {
+        const rgb = model?.triangleColors[triangle];
+        if (rgb) setSkinLastPick({ triangle, rgb: roundRgb(rgb) });
+        return;
+      }
+      handlePickTriangle(triangle);
+    },
+    [skinPickEnabled, model, handlePickTriangle],
   );
 
   const triangleAreaWeights = useMemo(() => {
@@ -3553,7 +3739,11 @@ export default function App({
         : t.colourPresetNeedsColourApply
       : "";
 
-  function handleApplyAdjustments(overrideAdjustments?: ColourAdjustments) {
+  function handleApplyAdjustments(
+    overrideAdjustments?: ColourAdjustments,
+    skipHistory = false,
+  ) {
+    if (!skipHistory) pushHistory();
     const next = { ...(overrideAdjustments ?? pendingAdjustments) };
     showProgress(
       "adjustment",
@@ -3645,9 +3835,16 @@ export default function App({
     virtualMixPriority?: VirtualMixPriorityMode;
     mappingStrategy?: MappingStrategyMode;
     colourDifferenceMetric?: ColourDifferenceMetric;
+    maxColours?: number;
+    colourAssignmentMode?: ColourAssignmentMode;
+    virtualPreviewLightness?: number;
   }
 
-  function handleApplyPaletteSettings(override?: PaletteSettingsOverride) {
+  function handleApplyPaletteSettings(
+    override?: PaletteSettingsOverride,
+    skipHistory = false,
+  ) {
+    if (!skipHistory) pushHistory();
     const pRecipe = override?.recipeResolution ?? pendingRecipeResolution;
     const pComponents =
       override?.maxVirtualMixComponents ?? pendingMaxVirtualMixComponents;
@@ -3656,13 +3853,15 @@ export default function App({
     const pMapping = override?.mappingStrategy ?? pendingMappingStrategy;
     const pMetric =
       override?.colourDifferenceMetric ?? pendingColourDifferenceMetric;
-    const next = normalizeMaxColours(pendingMaxColours);
+    const next = normalizeMaxColours(override?.maxColours ?? pendingMaxColours);
     const nextRecipeResolution = normalizeRecipeResolution(
       pRecipe,
       appliedRecipeResolution,
     );
-    const nextColourAssignmentMode = isColourAssignmentMode(pendingColourAssignmentMode)
-      ? pendingColourAssignmentMode
+    const pAssignment =
+      override?.colourAssignmentMode ?? pendingColourAssignmentMode;
+    const nextColourAssignmentMode = isColourAssignmentMode(pAssignment)
+      ? pAssignment
       : "physical-and-virtual";
     const nextMaxVirtualMixComponents = normalizeMaxVirtualMixComponents(
       pComponents,
@@ -3685,7 +3884,7 @@ export default function App({
       ? pMetric
       : "ciede2000";
     const nextVirtualPreviewLightness = normalizeVirtualPreviewLightness(
-      pendingVirtualPreviewLightness,
+      override?.virtualPreviewLightness ?? pendingVirtualPreviewLightness,
       0,
     );
     setPendingMaxColours(next);
@@ -4038,20 +4237,18 @@ export default function App({
       const sampleSource: RGB[] = [];
       const sampleWeights: number[] = [];
       const targetLab: ReturnType<typeof rgbToLab>[] = [];
-      const sampleLocked: boolean[] = [];
+      const sampleLocked: Array<RGB | null> = [];
       for (let k = 0; k < SAMPLE; k++) {
         const i = Math.min(total - 1, Math.floor(k * stride));
         const src = model.triangleColors[i];
         if (!src) continue;
-        const locked = !!(appliedSkinLock && appliedSkinMask?.[i]);
+        const zoneColour = zoneColourAt(i);
         sampleSource.push(src);
-        sampleLocked.push(locked);
+        sampleLocked.push(zoneColour);
         sampleWeights.push(Math.max(1e-9, triangleAreaWeights?.[i] ?? 1));
         // Target = original colours of the uploaded GLB/OBJ (left preview),
-        // or the unified skin colour where the skin lock applies.
-        targetLab.push(
-          rgbToLab(locked && appliedSkinLock ? appliedSkinLock.target : src),
-        );
+        // or the zone colour where a colour zone applies.
+        targetLab.push(rgbToLab(zoneColour ?? src));
       }
       if (sampleSource.length === 0) {
         setStatus(t.autoTuneToPrintSimulationUnavailable);
@@ -4061,14 +4258,9 @@ export default function App({
       // 2) Error of a candidate = weighted mean ΔE2000 between the original
       //    model colour and the resulting print-simulation colour.
       const evaluate = (adj: ColourAdjustments): number => {
-        const lockTarget = appliedSkinLock?.target;
         const plain = isDefaultAdjustments(adj);
-        const cols = sampleSource.map((c, s) =>
-          lockTarget && sampleLocked[s]
-            ? lockTarget
-            : plain
-              ? c
-              : adjustColour(c, adj),
+        const cols = sampleSource.map(
+          (c, s) => sampleLocked[s] ?? (plain ? c : adjustColour(c, adj)),
         );
         const pal = medianCutPalette(
           cols,
@@ -4231,13 +4423,7 @@ export default function App({
         if (!src) continue;
         cols.push(adjustedColors[i] || src);
         weights.push(Math.max(1e-9, triangleAreaWeights?.[i] ?? 1));
-        targetLab.push(
-          rgbToLab(
-            appliedSkinLock && appliedSkinMask?.[i]
-              ? appliedSkinLock.target
-              : src,
-          ),
-        );
+        targetLab.push(rgbToLab(zoneColourAt(i) ?? src));
       }
       if (cols.length === 0) {
         setStatus(t.autoTuneToPrintSimulationUnavailable);
@@ -4566,6 +4752,7 @@ export default function App({
     );
     let count = 0;
     for (let i = 0; i < mask.length; i++) count += mask[i];
+    pushHistory();
     setAppliedSkinLock({
       samples: [...skinSamples],
       protect: [...skinProtect],
@@ -4581,6 +4768,8 @@ export default function App({
   }
 
   function handleSkinRemove(): void {
+    if (!appliedSkinLock) return;
+    pushHistory();
     setAppliedSkinLock(null);
     setStatus(t.skinRemoved);
   }
@@ -4591,6 +4780,109 @@ export default function App({
     setSkinTarget(null);
     setSkinLastPick(null);
     setSkinShowSelection(false);
+  }
+
+  function pushHistory(): void {
+    const snapshot: HistorySnapshot = {
+      adjustments: { ...appliedAdjustments },
+      maxColours: appliedMaxColours,
+      colourAssignmentMode: appliedColourAssignmentMode,
+      maxVirtualMixComponents: appliedMaxVirtualMixComponents,
+      recipeResolution: appliedRecipeResolution,
+      accentProtection: appliedAccentProtection,
+      virtualMixPriority: appliedVirtualMixPriority,
+      mappingStrategy: appliedMappingStrategy,
+      colourDifferenceMetric: appliedColourDifferenceMetric,
+      virtualPreviewLightness: appliedVirtualPreviewLightness,
+      skinLock: appliedSkinLock,
+      zones: appliedZones,
+    };
+    setHistory((prev) => [...prev.slice(-9), snapshot]);
+  }
+
+  function handleUndo(): void {
+    const snap = history[history.length - 1];
+    if (!snap) return;
+    setHistory((prev) => prev.slice(0, -1));
+    setPendingAdjustments({ ...snap.adjustments });
+    if (!sameAdjustments(snap.adjustments, appliedAdjustments))
+      handleApplyAdjustments(snap.adjustments, true);
+    const paletteChanged =
+      snap.maxColours !== appliedMaxColours ||
+      snap.colourAssignmentMode !== appliedColourAssignmentMode ||
+      snap.maxVirtualMixComponents !== appliedMaxVirtualMixComponents ||
+      snap.recipeResolution !== appliedRecipeResolution ||
+      snap.accentProtection !== appliedAccentProtection ||
+      snap.virtualMixPriority !== appliedVirtualMixPriority ||
+      snap.mappingStrategy !== appliedMappingStrategy ||
+      snap.colourDifferenceMetric !== appliedColourDifferenceMetric ||
+      snap.virtualPreviewLightness !== appliedVirtualPreviewLightness;
+    if (paletteChanged) {
+      setPendingVirtualPreviewLightness(snap.virtualPreviewLightness);
+      handleApplyPaletteSettings(
+        {
+          maxColours: snap.maxColours,
+          colourAssignmentMode: snap.colourAssignmentMode,
+          maxVirtualMixComponents: snap.maxVirtualMixComponents,
+          recipeResolution: snap.recipeResolution,
+          accentProtection: snap.accentProtection,
+          virtualMixPriority: snap.virtualMixPriority,
+          mappingStrategy: snap.mappingStrategy,
+          colourDifferenceMetric: snap.colourDifferenceMetric,
+          virtualPreviewLightness: snap.virtualPreviewLightness,
+        },
+        true,
+      );
+    }
+    if (snap.skinLock !== appliedSkinLock) setAppliedSkinLock(snap.skinLock);
+    if (snap.zones !== appliedZones) setAppliedZones(snap.zones);
+    setStatus(t.undoDone);
+  }
+
+  function handleZoneNew(): void {
+    const zone = createZone(`Zone ${zones.length + 1}`);
+    setZones((prev) => [...prev, zone]);
+    setActiveZoneId(zone.id);
+    setZonePickEnabled(true);
+    setSkinPickEnabled(false);
+    setZoneClickTarget("point");
+    setZoneShowSelection(true);
+  }
+
+  function updateZone(id: string, patch: Partial<ColourZone>): void {
+    setZones((prev) => prev.map((z) => (z.id === id ? { ...z, ...patch } : z)));
+  }
+
+  function handleZoneDelete(id: string): void {
+    setZones((prev) => prev.filter((z) => z.id !== id));
+    if (activeZoneId === id) setActiveZoneId(null);
+  }
+
+  function handleZonesApply(): void {
+    if (!model) return;
+    const ready = zones.filter((z) => z.points.length > 0);
+    if (ready.length === 0) {
+      setStatus(t.zoneNothingToApply);
+      return;
+    }
+    pushHistory();
+    setAppliedZones(
+      ready.map((z) => ({
+        ...z,
+        points: [...z.points],
+        protect: [...z.protect],
+      })),
+    );
+    setZonePickEnabled(false);
+    setZoneShowSelection(false);
+    setStatus(`${t.zonesApplied} ${ready.length}`);
+  }
+
+  function handleZonesRemoveAll(): void {
+    if (appliedZones.length === 0) return;
+    pushHistory();
+    setAppliedZones([]);
+    setStatus(t.zonesRemoved);
   }
 
   function handleRebuildPreview(): void {
@@ -6359,7 +6651,10 @@ export default function App({
                   <button
                     type="button"
                     className={skinPickEnabled ? "" : "secondary"}
-                    onClick={() => setSkinPickEnabled((on) => !on)}
+                    onClick={() => {
+                      setSkinPickEnabled((on) => !on);
+                      setZonePickEnabled(false);
+                    }}
                     disabled={!model}
                     title={t.tipSkinPick}
                   >
@@ -6559,6 +6854,271 @@ export default function App({
                 ) : (
                   <p className="muted">{t.skinInactive}</p>
                 )}
+              </section>
+            )}
+
+            {activeTab === "adjustment" && (
+              <section className="card tab-card workflow-card">
+                <h2>{t.zonesTitle}</h2>
+                <p className="muted workflow-intro">{t.zonesIntro}</p>
+
+                <div className="adjustment-actions">
+                  <button
+                    type="button"
+                    onClick={handleZoneNew}
+                    disabled={!model}
+                    title={t.tipZoneNew}
+                  >
+                    {t.zoneNew}
+                  </button>
+                  <button
+                    type="button"
+                    className={zonePickEnabled ? "" : "secondary"}
+                    onClick={() => {
+                      setZonePickEnabled((on) => !on);
+                      setSkinPickEnabled(false);
+                    }}
+                    disabled={!model}
+                    title={t.tipZonePick}
+                  >
+                    {zonePickEnabled ? t.zonePickOn : t.zonePickOff}
+                  </button>
+                </div>
+                {zonePickEnabled && (
+                  <div className="zone-click-target">
+                    <label className="checkbox-row compact">
+                      <input
+                        type="radio"
+                        name="zone-click-target"
+                        checked={zoneClickTarget === "point"}
+                        onChange={() => setZoneClickTarget("point")}
+                      />
+                      {t.zoneClickAddsPoint}
+                    </label>
+                    <label className="checkbox-row compact">
+                      <input
+                        type="radio"
+                        name="zone-click-target"
+                        checked={zoneClickTarget === "protect"}
+                        onChange={() => setZoneClickTarget("protect")}
+                        disabled={!activeZone}
+                      />
+                      {t.zoneClickAddsProtect}
+                    </label>
+                  </div>
+                )}
+
+                {zones.length === 0 ? (
+                  <p className="muted">{t.zoneNone}</p>
+                ) : (
+                  <div className="zone-list">
+                    {zones.map((z) => (
+                      <div
+                        key={z.id}
+                        className={`zone-row${z.id === activeZoneId ? " active" : ""}`}
+                        onClick={() => setActiveZoneId(z.id)}
+                        title={t.tipZoneRow}
+                      >
+                        <span
+                          className="zone-swatch"
+                          style={{ background: rgbToHex(z.colour) }}
+                        />
+                        <span className="zone-row-name">{z.name}</span>
+                        <span className="muted">
+                          {z.points.length} {t.zonePointsShort}
+                        </span>
+                        {appliedZones.some((a) => a.id === z.id) && (
+                          <span className="zone-badge">{t.zoneAppliedBadge}</span>
+                        )}
+                        <button
+                          type="button"
+                          className="secondary compact"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleZoneDelete(z.id);
+                          }}
+                          title={t.zoneDelete}
+                          aria-label={t.zoneDelete}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {activeZone && (
+                  <div className="applied-summary">
+                    <div className="section-subtitle">
+                      {t.zoneEditing}: {activeZone.name}
+                    </div>
+                    <label className="inline-row">
+                      <HelpLabel title={t.tipZoneName}>{t.zoneName}</HelpLabel>
+                      <span className="zone-inline-inputs">
+                        <select
+                          value=""
+                          onChange={(event) => {
+                            const name = event.target.value;
+                            if (name) updateZone(activeZone.id, { name });
+                          }}
+                        >
+                          <option value="">{t.zoneNamePreset}</option>
+                          {ZONE_NAME_PRESETS.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          value={activeZone.name}
+                          onChange={(event) =>
+                            updateZone(activeZone.id, {
+                              name: event.target.value,
+                            })
+                          }
+                        />
+                      </span>
+                    </label>
+                    <label className="inline-row">
+                      <HelpLabel title={t.tipZoneColour}>{t.zoneColour}</HelpLabel>
+                      <span className="zone-inline-inputs">
+                        <input
+                          type="color"
+                          value={rgbToHex(activeZone.colour).toLowerCase()}
+                          onChange={(event) => {
+                            const parsed = parseHexColour(event.target.value);
+                            if (parsed)
+                              updateZone(activeZone.id, {
+                                colour: [parsed[0], parsed[1], parsed[2]],
+                              });
+                          }}
+                        />
+                        <span>{rgbToHex(activeZone.colour)}</span>
+                      </span>
+                    </label>
+                    <div className="adjustment-actions">
+                      <button
+                        type="button"
+                        className="secondary compact"
+                        disabled={!zoneLastPick}
+                        onClick={() => {
+                          if (zoneLastPick)
+                            updateZone(activeZone.id, { colour: zoneLastPick });
+                        }}
+                        title={t.tipZoneUseLastPick}
+                      >
+                        {t.zoneUseLastPick}
+                      </button>
+                      {zoneLastPick && (
+                        <span className="zone-last-pick">
+                          <span
+                            className="zone-swatch"
+                            style={{ background: rgbToHex(zoneLastPick) }}
+                          />
+                          {rgbToHex(zoneLastPick)}
+                        </span>
+                      )}
+                    </div>
+                    <SliderRow
+                      label={t.zoneTolerance}
+                      tooltip={t.tipZoneTolerance}
+                      value={activeZone.tolerance}
+                      min={2}
+                      max={40}
+                      step={1}
+                      onChange={(value) =>
+                        updateZone(activeZone.id, { tolerance: value })
+                      }
+                    />
+                    <SliderRow
+                      label={t.zoneGrow}
+                      tooltip={t.tipZoneGrow}
+                      value={activeZone.grow}
+                      min={-5}
+                      max={5}
+                      step={1}
+                      onChange={(value) =>
+                        updateZone(activeZone.id, { grow: value })
+                      }
+                    />
+                    <div className="section-subtitle">
+                      {t.zoneProtected} ({activeZone.protect.length})
+                    </div>
+                    <div className="skin-chips">
+                      {activeZone.protect.map((c, k) => (
+                        <button
+                          type="button"
+                          key={`p-${k}-${c.join(",")}`}
+                          className="skin-chip protect"
+                          style={{ background: rgbToHex(c) }}
+                          title={`${rgbToHex(c)} · ${t.zoneRemoveChip}`}
+                          onClick={() =>
+                            updateZone(activeZone.id, {
+                              protect: activeZone.protect.filter(
+                                (_, j) => j !== k,
+                              ),
+                            })
+                          }
+                        />
+                      ))}
+                    </div>
+                    <label className="checkbox-row" title={t.tipZoneShowSelection}>
+                      <input
+                        type="checkbox"
+                        checked={zoneShowSelection}
+                        onChange={(event) =>
+                          setZoneShowSelection(event.target.checked)
+                        }
+                      />
+                      {t.zoneShowSelection}
+                    </label>
+                    {pendingZoneMask && (
+                      <p className="muted">
+                        {pendingZoneCount.toLocaleString()}{" "}
+                        {t.zoneTrianglesSelected}
+                      </p>
+                    )}
+                    <div className="adjustment-actions">
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() =>
+                          updateZone(activeZone.id, { points: [], protect: [] })
+                        }
+                        disabled={
+                          activeZone.points.length === 0 &&
+                          activeZone.protect.length === 0
+                        }
+                      >
+                        {t.zoneClearPoints}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="adjustment-actions">
+                  <button
+                    type="button"
+                    onClick={handleZonesApply}
+                    disabled={!model || zones.every((z) => z.points.length === 0)}
+                  >
+                    {t.zonesApply}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleZonesRemoveAll}
+                    disabled={appliedZones.length === 0}
+                  >
+                    {t.zonesRemoveAll}
+                  </button>
+                </div>
+                <p className="muted">
+                  {appliedZones.length > 0
+                    ? `${t.zonesActive} ${appliedZones.length}`
+                    : t.zonesInactive}
+                </p>
               </section>
             )}
 
@@ -7909,6 +8469,15 @@ export default function App({
                     >
                       {t.rebuildPreview}
                     </button>
+                    <button
+                      type="button"
+                      className="secondary compact"
+                      disabled={history.length === 0 || !model}
+                      onClick={handleUndo}
+                      title={t.tipUndo}
+                    >
+                      {t.undo} ({history.length})
+                    </button>
                     {chromiumPreviewRisk && !chromiumPreviewBlocked ? (
                       <span className="preview-risk-note">
                         {t.chromiumPreviewWarning}
@@ -7992,14 +8561,14 @@ export default function App({
                           model={
                             threePreviewActive ? modelForComputedPreview : null
                           }
-                          adjustedColors={skinHighlightColors}
+                          adjustedColors={zoneHighlightColors}
                           previewMode={
-                            pendingSkinMask || previewMode === "adjusted"
+                            pendingZoneMask || pendingSkinMask || previewMode === "adjusted"
                               ? "adjusted"
                               : "quantized"
                           }
-                          pickEnabled={skinPickEnabled}
-                          onPickTriangle={handlePickTriangle}
+                          pickEnabled={zonePickEnabled || skinPickEnabled}
+                          onPickTriangle={handlePreviewPick}
                           palette={palette}
                           effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                           accentProtection={appliedAccentProtection}
@@ -8034,8 +8603,8 @@ export default function App({
                           }
                           adjustedColors={adjustedColors}
                           previewMode="print"
-                          pickEnabled={skinPickEnabled}
-                          onPickTriangle={handlePickTriangle}
+                          pickEnabled={zonePickEnabled || skinPickEnabled}
+                          onPickTriangle={handlePreviewPick}
                           palette={palette}
                           effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                           accentProtection={appliedAccentProtection}
@@ -8064,10 +8633,10 @@ export default function App({
                       key={`single-${previewResetKey}`}
                       ref={previewRef}
                       model={threePreviewActive ? modelForComputedPreview : null}
-                      adjustedColors={skinHighlightColors}
-                      previewMode={pendingSkinMask ? "adjusted" : previewMode}
-                      pickEnabled={skinPickEnabled}
-                      onPickTriangle={handlePickTriangle}
+                      adjustedColors={zoneHighlightColors}
+                      previewMode={pendingZoneMask || pendingSkinMask ? "adjusted" : previewMode}
+                      pickEnabled={zonePickEnabled || skinPickEnabled}
+                      onPickTriangle={handlePreviewPick}
                       palette={palette}
                       effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                       accentProtection={appliedAccentProtection}
