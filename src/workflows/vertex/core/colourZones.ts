@@ -217,6 +217,7 @@ export function countMask(mask: Uint8Array): number {
 export const ZONE_NAME_PRESETS = [
   "Skin",
   "Lips",
+  "Nipples",
   "Eyes",
   "Eyebrows",
   "Hair",

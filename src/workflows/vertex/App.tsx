@@ -2305,7 +2305,7 @@ export default function App({
       const seedLab = zone.points.map((p) => rgbToLab(p.rgb));
       const guard = skinGuardSamples.filter((c) => {
         const lab = rgbToLab(c);
-        return seedLab.every((s) => zoneDistance(lab, s) > 6);
+        return seedLab.every((s) => zoneDistance(lab, s) > 2);
       });
       return guard.length > 0
         ? { ...zone, protect: [...zone.protect, ...guard] }
