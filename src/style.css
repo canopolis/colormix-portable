@@ -61,6 +61,11 @@ button.secondary { background: #283746; color: #e8eef5; border: 1px solid #3a455
 .wand-button { display: inline-flex; align-items: center; justify-content: center; line-height: 0; padding: 0.3rem 0.45rem; margin-bottom: 12px; }
 .wand-button:not(:disabled):hover svg { filter: drop-shadow(0 0 4px rgba(159, 227, 255, 0.9)); }
 .wand-button:disabled { opacity: 0.45; cursor: not-allowed; }
+.skin-picked { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+.skin-swatch-large { width: 28px; height: 28px; flex: none; border-radius: 6px; border: 1px solid rgba(127,127,127,0.6); }
+.skin-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; min-height: 4px; }
+.skin-chip { width: 22px; height: 22px; min-width: 0; padding: 0; border-radius: 5px; border: 1px solid rgba(127,127,127,0.7); cursor: pointer; }
+.skin-chip.protect { outline: 2px dashed #e5484d; outline-offset: 1px; }
 .advisor-list { margin: 8px 0; padding-left: 20px; display: grid; gap: 6px; }
 .advisor-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(127,127,127,0.6); vertical-align: -1px; margin-right: 4px; }
 .card h3 { font-size: 0.9rem; margin: 12px 0 8px; color: #cbd6e2; }

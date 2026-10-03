@@ -124,6 +124,46 @@ const en: Dict = {
   advisorCurrentCeiling: "Best reachable with current filaments",
   advisorNote:
     "Values are the best reachable average difference to the original model colours (lower is better), before palette reduction. The real result also depends on the palette settings.",
+  skinUnify: "Skin unify",
+  skinUnifyIntro:
+    "Optional. Click a point on the model to see its exact colour, then use it as the general skin colour. All skin tones similar to it become one single colour (one filament mix), while eyebrows, eyes, pupils, lips and hair keep their colours. If you do not apply it, nothing changes.",
+  tipSkinPick:
+    "When active, a click (not a drag) on either preview reads the exact original colour of the triangle under the cursor. Dragging still rotates the view.",
+  skinPickOn: "Picking ON: click the model (press to stop)",
+  skinPickOff: "Pick colour on the model",
+  skinPickedPoint: "Picked point",
+  skinNoPick: "No point picked yet. Turn on picking and click on the model.",
+  skinUseAsGeneral: "Use as general skin colour",
+  tipSkinUseAsGeneral:
+    "Sets this colour as the final skin colour and adds it as a skin sample.",
+  skinAddSample: "Add as skin tone",
+  tipSkinAddSample:
+    "Adds this colour to the skin selection without changing the final colour. Use it for shaded or brightly lit skin.",
+  skinProtectColour: "Protect (not skin)",
+  tipSkinProtect:
+    "Marks this colour as NOT skin, for example lips or eye contour. Colours closer to a protected sample than to the skin samples are never unified.",
+  skinGeneralColour: "General skin colour",
+  skinChosen: "chosen",
+  skinAverage: "average of skin samples",
+  skinNoGeneral: "Not set.",
+  skinSamplesLabel: "Skin samples",
+  skinProtectLabel: "Protected colours",
+  skinRemoveChip: "click to remove",
+  skinTolerance: "Skin tolerance",
+  tipSkinTolerance:
+    "How different a tone can be from the skin samples and still be unified. Lightness (shading) counts less than hue, so shaded skin is included before lips or hair.",
+  skinShowSelection: "Show selection (magenta) on the left preview",
+  tipSkinShowSelection:
+    "Paints in magenta the triangles that would be unified, before applying.",
+  skinApply: "Apply skin unify",
+  skinRemove: "Remove skin unify",
+  skinClear: "Clear samples",
+  skinActive: "Skin unify active:",
+  skinInactive: "Skin unify not applied. The model keeps its original colours.",
+  skinNeedSamples: "Pick at least one skin colour first.",
+  skinApplied: "Skin unified:",
+  skinTriangles: "triangles",
+  skinRemoved: "Skin unify removed. Original skin colours restored.",
   autoTuneToPrintSimulationUnavailable:
     "Build the reduced palette and print simulation plan first, then use the magic wand.",
   brightness: "Brightness",

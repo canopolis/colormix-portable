@@ -113,6 +113,10 @@ interface ThreePreviewProps {
   onSyncChange?: (state: CameraSyncState) => void;
   emptyLabel?: string;
   busyLabel?: string;
+  /** When true, a click (not a drag) on the model reports the picked triangle. */
+  pickEnabled?: boolean;
+  /** Receives the index of the ORIGINAL model triangle under the click. */
+  onPickTriangle?: (sourceTriangleIndex: number) => void;
 }
 
 function srgbChannelToLinear(v: number): number {
@@ -590,10 +594,14 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       onSyncChange,
       emptyLabel = "No model loaded.",
       busyLabel = "Building preview...",
+      pickEnabled = false,
+      onPickTriangle,
     },
     ref,
   ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
+    const onPickTriangleRef = useRef(onPickTriangle);
+    onPickTriangleRef.current = onPickTriangle;
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const controlsRef = useRef<OrbitControls | null>(null);
@@ -1108,6 +1116,51 @@ export const ThreePreview = forwardRef<ThreePreviewHandle, ThreePreviewProps>(
       }
       if (!showAxisLabels) hideAxisLabelElements(axisLabelRefs.current);
     }, [showAxes, showAxisLabels, trianglesShown]);
+
+    // Click-to-pick: report the original triangle under the cursor. A press
+    // that moves more than a few pixels is a camera drag, not a pick.
+    useEffect(() => {
+      const renderer = rendererRef.current;
+      if (!pickEnabled || !renderer) return;
+      const element = renderer.domElement;
+      let pressed = false;
+      let downX = 0;
+      let downY = 0;
+      const handleDown = (event: PointerEvent) => {
+        pressed = true;
+        downX = event.clientX;
+        downY = event.clientY;
+      };
+      const handleUp = (event: PointerEvent) => {
+        if (!pressed) return;
+        pressed = false;
+        if (Math.hypot(event.clientX - downX, event.clientY - downY) > 5) return;
+        const camera = cameraRef.current;
+        const mesh = meshRef.current;
+        if (!camera || !mesh) return;
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const pointer = new THREE.Vector2(
+          ((event.clientX - rect.left) / rect.width) * 2 - 1,
+          -((event.clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(pointer, camera);
+        const hit = raycaster.intersectObject(mesh, false)[0];
+        if (!hit || hit.faceIndex === undefined || hit.faceIndex === null) return;
+        const sourceIndex = previewTriangleIndicesRef.current[hit.faceIndex];
+        if (sourceIndex !== undefined) onPickTriangleRef.current?.(sourceIndex);
+      };
+      element.addEventListener("pointerdown", handleDown);
+      element.addEventListener("pointerup", handleUp);
+      const previousCursor = element.style.cursor;
+      element.style.cursor = "crosshair";
+      return () => {
+        element.removeEventListener("pointerdown", handleDown);
+        element.removeEventListener("pointerup", handleUp);
+        element.style.cursor = previousCursor;
+      };
+    }, [pickEnabled]);
 
     return (
       <div className={`three-preview-wrap preview-bg-${background}`}>

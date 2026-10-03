@@ -1596,6 +1596,79 @@ function paletteIndexPreview(indices: number[], maxItems = 8): string {
     .join(" ")} ...`;
 }
 
+interface SkinLockSettings {
+  samples: RGB[];
+  protect: RGB[];
+  tolerance: number;
+  target: RGB;
+}
+
+/**
+ * Distance used to decide whether a colour belongs to the skin. Lightness
+ * differences count much less than hue/chroma differences, so shaded and lit
+ * skin are both included while lips (redder) or hair (more saturated) are not.
+ */
+function skinDistance(
+  a: ReturnType<typeof rgbToLab>,
+  b: ReturnType<typeof rgbToLab>,
+): number {
+  const dL = (a.L - b.L) * 0.35;
+  const da = a.a - b.a;
+  const db = a.b - b.b;
+  return Math.sqrt(dL * dL + da * da + db * db);
+}
+
+/** 1 = triangle belongs to the skin selection, 0 = untouched. */
+function computeSkinMask(
+  colors: RGB[],
+  samples: RGB[],
+  protect: RGB[],
+  tolerance: number,
+): Uint8Array {
+  const mask = new Uint8Array(colors.length);
+  if (samples.length === 0) return mask;
+  const sampleLab = samples.map((c) => rgbToLab(c));
+  const protectLab = protect.map((c) => rgbToLab(c));
+  const cache = new Map<number, number>();
+  for (let i = 0; i < colors.length; i++) {
+    const c = colors[i];
+    if (!c) continue;
+    const key =
+      (Math.round(c[0]) << 16) | (Math.round(c[1]) << 8) | Math.round(c[2]);
+    let value = cache.get(key);
+    if (value === undefined) {
+      const lab = rgbToLab(c);
+      let toSkin = Number.POSITIVE_INFINITY;
+      for (const s of sampleLab) toSkin = Math.min(toSkin, skinDistance(lab, s));
+      let toProtect = Number.POSITIVE_INFINITY;
+      for (const p of protectLab)
+        toProtect = Math.min(toProtect, skinDistance(lab, p));
+      value = toSkin <= tolerance && toSkin < toProtect ? 1 : 0;
+      cache.set(key, value);
+    }
+    mask[i] = value;
+  }
+  return mask;
+}
+
+function averageRgb(colors: RGB[]): RGB {
+  if (colors.length === 0) return [200, 170, 150];
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  for (const c of colors) {
+    r += c[0];
+    g += c[1];
+    b += c[2];
+  }
+  const n = colors.length;
+  return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+}
+
+function roundRgb(c: RGB): RGB {
+  return [Math.round(c[0]), Math.round(c[1]), Math.round(c[2])];
+}
+
 interface AdvisorSwap {
   slot: number;
   from: string;
@@ -2134,11 +2207,72 @@ export default function App({
     ? null
     : previewModel;
 
+  // Skin unify (optional): nothing changes unless the user applies it.
+  const [skinPickEnabled, setSkinPickEnabled] = useState(false);
+  const [skinLastPick, setSkinLastPick] = useState<{
+    triangle: number;
+    rgb: RGB;
+  } | null>(null);
+  const [skinSamples, setSkinSamples] = useState<RGB[]>([]);
+  const [skinProtect, setSkinProtect] = useState<RGB[]>([]);
+  const [skinTolerance, setSkinTolerance] = useState(12);
+  const [skinTarget, setSkinTarget] = useState<RGB | null>(null);
+  const [skinShowSelection, setSkinShowSelection] = useState(false);
+  const [appliedSkinLock, setAppliedSkinLock] =
+    useState<SkinLockSettings | null>(null);
+
+  const appliedSkinMask = useMemo(() => {
+    if (!model || !appliedSkinLock || largeModelComputationsDeferred)
+      return null;
+    return computeSkinMask(
+      model.triangleColors,
+      appliedSkinLock.samples,
+      appliedSkinLock.protect,
+      appliedSkinLock.tolerance,
+    );
+  }, [model, appliedSkinLock, largeModelComputationsDeferred]);
+
   const adjustedColors = useMemo(() => {
     if (!model || largeModelComputationsDeferred) return [];
-    if (isDefaultAdjustments(appliedAdjustments)) return model.triangleColors;
-    return model.triangleColors.map((c) => adjustColour(c, appliedAdjustments));
-  }, [model, appliedAdjustments, largeModelComputationsDeferred]);
+    const base = isDefaultAdjustments(appliedAdjustments)
+      ? model.triangleColors
+      : model.triangleColors.map((c) => adjustColour(c, appliedAdjustments));
+    if (!appliedSkinLock || !appliedSkinMask) return base;
+    const target = appliedSkinLock.target;
+    return base.map((c, i) => (appliedSkinMask[i] ? target : c));
+  }, [
+    model,
+    appliedAdjustments,
+    largeModelComputationsDeferred,
+    appliedSkinLock,
+    appliedSkinMask,
+  ]);
+
+  // Live highlight of the pending skin selection (left preview only).
+  const pendingSkinMask = useMemo(() => {
+    if (!model || !skinShowSelection || skinSamples.length === 0) return null;
+    return computeSkinMask(
+      model.triangleColors,
+      skinSamples,
+      skinProtect,
+      skinTolerance,
+    );
+  }, [model, skinShowSelection, skinSamples, skinProtect, skinTolerance]);
+
+  const skinHighlightColors = useMemo(() => {
+    if (!pendingSkinMask) return adjustedColors;
+    const highlight: RGB = [255, 0, 200];
+    return adjustedColors.map((c, i) => (pendingSkinMask[i] ? highlight : c));
+  }, [adjustedColors, pendingSkinMask]);
+
+  const handlePickTriangle = useCallback(
+    (triangle: number) => {
+      const rgb = model?.triangleColors[triangle];
+      if (!rgb) return;
+      setSkinLastPick({ triangle, rgb: roundRgb(rgb) });
+    },
+    [model],
+  );
 
   const triangleAreaWeights = useMemo(() => {
     if (!model || largeModelComputationsDeferred) return [];
@@ -3904,14 +4038,20 @@ export default function App({
       const sampleSource: RGB[] = [];
       const sampleWeights: number[] = [];
       const targetLab: ReturnType<typeof rgbToLab>[] = [];
+      const sampleLocked: boolean[] = [];
       for (let k = 0; k < SAMPLE; k++) {
         const i = Math.min(total - 1, Math.floor(k * stride));
         const src = model.triangleColors[i];
         if (!src) continue;
+        const locked = !!(appliedSkinLock && appliedSkinMask?.[i]);
         sampleSource.push(src);
+        sampleLocked.push(locked);
         sampleWeights.push(Math.max(1e-9, triangleAreaWeights?.[i] ?? 1));
-        // Target = original colours of the uploaded GLB/OBJ (left preview).
-        targetLab.push(rgbToLab(src));
+        // Target = original colours of the uploaded GLB/OBJ (left preview),
+        // or the unified skin colour where the skin lock applies.
+        targetLab.push(
+          rgbToLab(locked && appliedSkinLock ? appliedSkinLock.target : src),
+        );
       }
       if (sampleSource.length === 0) {
         setStatus(t.autoTuneToPrintSimulationUnavailable);
@@ -3921,9 +4061,15 @@ export default function App({
       // 2) Error of a candidate = weighted mean ΔE2000 between the original
       //    model colour and the resulting print-simulation colour.
       const evaluate = (adj: ColourAdjustments): number => {
-        const cols = isDefaultAdjustments(adj)
-          ? sampleSource
-          : sampleSource.map((c) => adjustColour(c, adj));
+        const lockTarget = appliedSkinLock?.target;
+        const plain = isDefaultAdjustments(adj);
+        const cols = sampleSource.map((c, s) =>
+          lockTarget && sampleLocked[s]
+            ? lockTarget
+            : plain
+              ? c
+              : adjustColour(c, adj),
+        );
         const pal = medianCutPalette(
           cols,
           appliedMaxColours,
@@ -4085,7 +4231,13 @@ export default function App({
         if (!src) continue;
         cols.push(adjustedColors[i] || src);
         weights.push(Math.max(1e-9, triangleAreaWeights?.[i] ?? 1));
-        targetLab.push(rgbToLab(src));
+        targetLab.push(
+          rgbToLab(
+            appliedSkinLock && appliedSkinMask?.[i]
+              ? appliedSkinLock.target
+              : src,
+          ),
+        );
       }
       if (cols.length === 0) {
         setStatus(t.autoTuneToPrintSimulationUnavailable);
@@ -4398,6 +4550,47 @@ export default function App({
     } finally {
       setAdvisorBusy(false);
     }
+  }
+
+  function handleSkinApply(): void {
+    if (!model || skinSamples.length === 0) {
+      setStatus(t.skinNeedSamples);
+      return;
+    }
+    const target = skinTarget ?? averageRgb(skinSamples);
+    const mask = computeSkinMask(
+      model.triangleColors,
+      skinSamples,
+      skinProtect,
+      skinTolerance,
+    );
+    let count = 0;
+    for (let i = 0; i < mask.length; i++) count += mask[i];
+    setAppliedSkinLock({
+      samples: [...skinSamples],
+      protect: [...skinProtect],
+      tolerance: skinTolerance,
+      target,
+    });
+    setSkinShowSelection(false);
+    setSkinPickEnabled(false);
+    const pct = mask.length > 0 ? ((count / mask.length) * 100).toFixed(1) : "0";
+    setStatus(
+      `${t.skinApplied} ${count.toLocaleString()} ${t.skinTriangles} (${pct}%) → ${rgbToHex(target)}`,
+    );
+  }
+
+  function handleSkinRemove(): void {
+    setAppliedSkinLock(null);
+    setStatus(t.skinRemoved);
+  }
+
+  function handleSkinClear(): void {
+    setSkinSamples([]);
+    setSkinProtect([]);
+    setSkinTarget(null);
+    setSkinLastPick(null);
+    setSkinShowSelection(false);
   }
 
   function handleRebuildPreview(): void {
@@ -6157,6 +6350,218 @@ export default function App({
               </section>
             )}
 
+            {activeTab === "adjustment" && (
+              <section className="card tab-card workflow-card">
+                <h2>{t.skinUnify}</h2>
+                <p className="muted workflow-intro">{t.skinUnifyIntro}</p>
+
+                <div className="adjustment-actions">
+                  <button
+                    type="button"
+                    className={skinPickEnabled ? "" : "secondary"}
+                    onClick={() => setSkinPickEnabled((on) => !on)}
+                    disabled={!model}
+                    title={t.tipSkinPick}
+                  >
+                    {skinPickEnabled ? t.skinPickOn : t.skinPickOff}
+                  </button>
+                </div>
+
+                <div className="applied-summary">
+                  <div className="section-subtitle">{t.skinPickedPoint}</div>
+                  {skinLastPick ? (
+                    <div className="skin-picked">
+                      <span
+                        className="skin-swatch-large"
+                        style={{ background: rgbToHex(skinLastPick.rgb) }}
+                      />
+                      <span>
+                        <strong>{rgbToHex(skinLastPick.rgb)}</strong> · RGB{" "}
+                        {skinLastPick.rgb[0]}, {skinLastPick.rgb[1]},{" "}
+                        {skinLastPick.rgb[2]}
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="muted">{t.skinNoPick}</p>
+                  )}
+                  <div className="adjustment-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!skinLastPick) return;
+                        const rgb = skinLastPick.rgb;
+                        setSkinTarget(rgb);
+                        setSkinSamples((prev) =>
+                          prev.some(
+                            (c) =>
+                              c[0] === rgb[0] &&
+                              c[1] === rgb[1] &&
+                              c[2] === rgb[2],
+                          )
+                            ? prev
+                            : [...prev, rgb],
+                        );
+                      }}
+                      disabled={!skinLastPick}
+                      title={t.tipSkinUseAsGeneral}
+                    >
+                      {t.skinUseAsGeneral}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        if (skinLastPick)
+                          setSkinSamples((prev) => [...prev, skinLastPick.rgb]);
+                      }}
+                      disabled={!skinLastPick}
+                      title={t.tipSkinAddSample}
+                    >
+                      {t.skinAddSample}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => {
+                        if (skinLastPick)
+                          setSkinProtect((prev) => [...prev, skinLastPick.rgb]);
+                      }}
+                      disabled={!skinLastPick}
+                      title={t.tipSkinProtect}
+                    >
+                      {t.skinProtectColour}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="applied-summary">
+                  <div className="section-subtitle">{t.skinGeneralColour}</div>
+                  {skinSamples.length > 0 || skinTarget ? (
+                    <div className="skin-picked">
+                      <span
+                        className="skin-swatch-large"
+                        style={{
+                          background: rgbToHex(
+                            skinTarget ?? averageRgb(skinSamples),
+                          ),
+                        }}
+                      />
+                      <span>
+                        <strong>
+                          {rgbToHex(skinTarget ?? averageRgb(skinSamples))}
+                        </strong>{" "}
+                        · {skinTarget ? t.skinChosen : t.skinAverage}
+                      </span>
+                    </div>
+                  ) : (
+                    <p className="muted">{t.skinNoGeneral}</p>
+                  )}
+                  <div className="section-subtitle">
+                    {t.skinSamplesLabel} ({skinSamples.length})
+                  </div>
+                  <div className="skin-chips">
+                    {skinSamples.map((c, k) => (
+                      <button
+                        type="button"
+                        key={`s-${k}-${c.join(",")}`}
+                        className="skin-chip"
+                        style={{ background: rgbToHex(c) }}
+                        title={`${rgbToHex(c)} · ${t.skinRemoveChip}`}
+                        onClick={() =>
+                          setSkinSamples((prev) =>
+                            prev.filter((_, j) => j !== k),
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                  <div className="section-subtitle">
+                    {t.skinProtectLabel} ({skinProtect.length})
+                  </div>
+                  <div className="skin-chips">
+                    {skinProtect.map((c, k) => (
+                      <button
+                        type="button"
+                        key={`p-${k}-${c.join(",")}`}
+                        className="skin-chip protect"
+                        style={{ background: rgbToHex(c) }}
+                        title={`${rgbToHex(c)} · ${t.skinRemoveChip}`}
+                        onClick={() =>
+                          setSkinProtect((prev) =>
+                            prev.filter((_, j) => j !== k),
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <SliderRow
+                  label={t.skinTolerance}
+                  tooltip={t.tipSkinTolerance}
+                  value={skinTolerance}
+                  min={2}
+                  max={40}
+                  step={1}
+                  onChange={setSkinTolerance}
+                  disabled={skinSamples.length === 0}
+                />
+                <label className="checkbox-row" title={t.tipSkinShowSelection}>
+                  <input
+                    type="checkbox"
+                    checked={skinShowSelection}
+                    disabled={skinSamples.length === 0}
+                    onChange={(e) => setSkinShowSelection(e.target.checked)}
+                  />
+                  {t.skinShowSelection}
+                </label>
+
+                <div className="adjustment-actions">
+                  <button
+                    type="button"
+                    onClick={handleSkinApply}
+                    disabled={!model || skinSamples.length === 0}
+                  >
+                    {t.skinApply}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleSkinRemove}
+                    disabled={!appliedSkinLock}
+                  >
+                    {t.skinRemove}
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={handleSkinClear}
+                    disabled={
+                      skinSamples.length === 0 &&
+                      skinProtect.length === 0 &&
+                      !skinLastPick
+                    }
+                  >
+                    {t.skinClear}
+                  </button>
+                </div>
+                {appliedSkinLock ? (
+                  <div className="skin-picked">
+                    <span
+                      className="skin-swatch-large"
+                      style={{ background: rgbToHex(appliedSkinLock.target) }}
+                    />
+                    <span>
+                      {t.skinActive}{" "}
+                      <strong>{rgbToHex(appliedSkinLock.target)}</strong>
+                    </span>
+                  </div>
+                ) : (
+                  <p className="muted">{t.skinInactive}</p>
+                )}
+              </section>
+            )}
+
             {activeTab === "physical" && (
               <section className="card tab-card workflow-card">
                 <h2>{t.physicalColours}</h2>
@@ -7587,10 +7992,14 @@ export default function App({
                           model={
                             threePreviewActive ? modelForComputedPreview : null
                           }
-                          adjustedColors={adjustedColors}
+                          adjustedColors={skinHighlightColors}
                           previewMode={
-                            previewMode === "adjusted" ? "adjusted" : "quantized"
+                            pendingSkinMask || previewMode === "adjusted"
+                              ? "adjusted"
+                              : "quantized"
                           }
+                          pickEnabled={skinPickEnabled}
+                          onPickTriangle={handlePickTriangle}
                           palette={palette}
                           effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                           accentProtection={appliedAccentProtection}
@@ -7625,6 +8034,8 @@ export default function App({
                           }
                           adjustedColors={adjustedColors}
                           previewMode="print"
+                          pickEnabled={skinPickEnabled}
+                          onPickTriangle={handlePickTriangle}
                           palette={palette}
                           effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                           accentProtection={appliedAccentProtection}
@@ -7653,8 +8064,10 @@ export default function App({
                       key={`single-${previewResetKey}`}
                       ref={previewRef}
                       model={threePreviewActive ? modelForComputedPreview : null}
-                      adjustedColors={adjustedColors}
-                      previewMode={previewMode}
+                      adjustedColors={skinHighlightColors}
+                      previewMode={pendingSkinMask ? "adjusted" : previewMode}
+                      pickEnabled={skinPickEnabled}
+                      onPickTriangle={handlePickTriangle}
                       palette={palette}
                       effectivePaletteRgbByIndex={effectivePaletteRgbByIndex}
                       accentProtection={appliedAccentProtection}
