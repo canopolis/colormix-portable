@@ -193,6 +193,10 @@ const en: Dict = {
   zoneColour: "Zone colour",
   tipZoneColour:
     "Final colour of the zone. Any colour can be chosen; the print uses the closest mixture your filaments can produce.",
+  zoneUseColourOf: "Use colour of zone…",
+  tipZoneUseColourOf:
+    "Copies a colour into this zone: the last point you clicked on the model, or the colour of another zone.",
+  zoneLastClicked: "Last clicked colour",
   zoneUseLastPick: "Use last clicked colour",
   tipZoneUseLastPick: "Sets the zone colour to the colour of the last point you clicked.",
   zoneTolerance: "Tolerance",

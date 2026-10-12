@@ -6998,18 +6998,41 @@ export default function App({
                       </span>
                     </label>
                     <div className="adjustment-actions">
-                      <button
-                        type="button"
-                        className="secondary compact"
-                        disabled={!zoneLastPick}
-                        onClick={() => {
-                          if (zoneLastPick)
-                            updateZone(activeZone.id, { colour: zoneLastPick });
+                      <select
+                        value=""
+                        title={t.tipZoneUseColourOf}
+                        disabled={
+                          !zoneLastPick &&
+                          !zones.some((z) => z.id !== activeZone.id)
+                        }
+                        onChange={(event) => {
+                          const choice = event.target.value;
+                          if (choice === "__last__") {
+                            if (zoneLastPick)
+                              updateZone(activeZone.id, { colour: zoneLastPick });
+                            return;
+                          }
+                          const source = zones.find((z) => z.id === choice);
+                          if (source)
+                            updateZone(activeZone.id, {
+                              colour: [...source.colour] as RGB,
+                            });
                         }}
-                        title={t.tipZoneUseLastPick}
                       >
-                        {t.zoneUseLastPick}
-                      </button>
+                        <option value="">{t.zoneUseColourOf}</option>
+                        {zoneLastPick && (
+                          <option value="__last__">
+                            {t.zoneLastClicked} · {rgbToHex(zoneLastPick)}
+                          </option>
+                        )}
+                        {zones
+                          .filter((z) => z.id !== activeZone.id)
+                          .map((z) => (
+                            <option key={z.id} value={z.id}>
+                              {z.name} · {rgbToHex(z.colour)}
+                            </option>
+                          ))}
+                      </select>
                       {zoneLastPick && (
                         <span className="zone-last-pick">
                           <span
