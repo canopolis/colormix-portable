@@ -18,6 +18,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+
+      - name: Build ratdoux engine (WebAssembly)
+        shell: bash
+        run: |
+          mkdir -p src/workflows/vertex/core/ratdoux
+          emcc -O2 -std=c++17 cpp/colorin_wasm.cpp cpp/FullSpectrumKSPairResidual.cpp cpp/FullSpectrumICCPolynomialEstimator.cpp -o src/workflows/vertex/core/ratdoux/colorinWasm.js -sMODULARIZE=1 -sEXPORT_ES6=1 -sSINGLE_FILE=1 -sENVIRONMENT=web -sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_cm_predict -sEXPORTED_RUNTIME_METHODS=cwrap
+
 
       - name: Install dependencies
         run: npm install
