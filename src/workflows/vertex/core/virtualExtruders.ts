@@ -988,7 +988,7 @@ export function buildVirtualExtruderPlan(
   const mappingErrors: Array<{ error: number; weight: number }> = [];
 
   for (const p of orderedPalette) {
-    const best = opts.mappingStrategy === "ratdoux" && isRatdouxReady()
+    const best: ReturnType<typeof bestBlendForColour> = opts.mappingStrategy === "ratdoux" && isRatdouxReady()
       ? ratdouxBestBlend(p.rgb, blendCandidates, opts.colourDifferenceMetric)
       : bestBlendForColour(
       p.rgb,
