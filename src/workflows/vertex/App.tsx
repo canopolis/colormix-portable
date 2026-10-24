@@ -445,7 +445,8 @@ function isMappingStrategyMode(value: unknown): value is MappingStrategyMode {
     value === "smooth" ||
     value === "preserve-hue" ||
     value === "preserve-accent" ||
-    value === "warm-neutral"
+    value === "warm-neutral" ||
+    value === "ratdoux"
   );
 }
 
@@ -1855,9 +1856,9 @@ export default function App({
   const [appliedVirtualMixPriority, setAppliedVirtualMixPriority] =
     useState<VirtualMixPriorityMode>("accurate");
   const [pendingMappingStrategy, setPendingMappingStrategy] =
-    useState<MappingStrategyMode>("closest");
+    useState<MappingStrategyMode>("ratdoux");
   const [appliedMappingStrategy, setAppliedMappingStrategy] =
-    useState<MappingStrategyMode>("closest");
+    useState<MappingStrategyMode>("ratdoux");
   const [pendingColourDifferenceMetric, setPendingColourDifferenceMetric] =
     useState<ColourDifferenceMetric>("ciede2000");
   const [appliedColourDifferenceMetric, setAppliedColourDifferenceMetric] =
@@ -6059,6 +6060,7 @@ export default function App({
                       )
                     }
                   >
+                    <option value="ratdoux">Motor ratdoux (FullSpectrum v0.9.18)</option>
                     <option value="closest">{t.mappingClosest}</option>
                     <option value="smooth">{t.mappingSmooth}</option>
                     <option value="warm-neutral">{t.mappingWarmNeutral}</option>
