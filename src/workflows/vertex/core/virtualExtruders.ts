@@ -19,6 +19,13 @@ import {
   rgbToLab,
   type LAB,
 } from "./prusaFdmMixer";
+import {
+  isRatdouxReady,
+  oklabFromRgb255,
+  ratdouxError,
+  ratdouxPredict,
+  type Oklab,
+} from "./ratdouxEngine";
 
 export interface VirtualBlendComponent {
   extruder: number;
@@ -861,6 +868,68 @@ function emptyMappingDiagnostics(
   };
 }
 
+
+// ---------------------------------------------------------------------------
+// Motor ratdoux (Snapmaker Orca FullSpectrum v0.9.18). Same printable
+// candidates as the ColorMix mapping; the predicted colour comes from the
+// v0.9.18 KM/K-S model and the choice from the v0.9.18 Oklab solver score.
+// ---------------------------------------------------------------------------
+const ratdouxCandidateData = new WeakMap<
+  BlendCandidate,
+  { rgb: RGB; lab: LAB; oklab: Oklab } | null
+>();
+
+function ratdouxCandidate(candidate: BlendCandidate) {
+  if (ratdouxCandidateData.has(candidate))
+    return ratdouxCandidateData.get(candidate) ?? null;
+  const hexes = candidate.active.map((item) => rgbToHex(item.slot.filament.effectiveRgb));
+  const counts = candidate.active.map(
+    (_item, index) => candidate.unitCounts[index] ?? candidate.active[index].unitCount,
+  );
+  const total = Math.max(1, counts.reduce((sum, count) => sum + count, 0));
+  const percents = counts.map((count) => Math.round((count * 100) / total));
+  const rgb = ratdouxPredict(hexes, percents);
+  const data = rgb ? { rgb, lab: rgbToLab(rgb), oklab: oklabFromRgb255(rgb) } : null;
+  ratdouxCandidateData.set(candidate, data);
+  return data;
+}
+
+function ratdouxBestBlend(
+  targetRgb: RGB,
+  candidates: BlendCandidate[],
+  colourDifferenceMetric: ColourDifferenceMetric,
+): ReturnType<typeof bestBlendForColour> {
+  const target = oklabFromRgb255(targetRgb);
+  let bestIndex = -1;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < candidates.length; index++) {
+    const data = ratdouxCandidate(candidates[index]);
+    if (!data) continue;
+    const score = ratdouxError(target, data.oklab);
+    if (score < bestScore) {
+      bestScore = score;
+      bestIndex = index;
+    }
+  }
+  if (bestIndex < 0) return null;
+  const best = candidates[bestIndex];
+  const data = ratdouxCandidate(best)!;
+  const error = colourDistance(rgbToLab(targetRgb), data.lab, colourDifferenceMetric);
+  return {
+    subset: best.subset,
+    ratios: best.ratios,
+    active: best.active,
+    sequence: best.sequence,
+    sequenceKey: best.sequenceKey,
+    unitCounts: best.unitCounts,
+    fdmRgb: data.rgb,
+    fdmLab: data.lab,
+    layerAverageRgb: best.layerAverageRgb,
+    error,
+    diagnosticError: error,
+  };
+}
+
 export function buildVirtualExtruderPlan(
   palette: PaletteEntry[],
   physicalSlots: PhysicalSlot[],
@@ -919,7 +988,9 @@ export function buildVirtualExtruderPlan(
   const mappingErrors: Array<{ error: number; weight: number }> = [];
 
   for (const p of orderedPalette) {
-    const best = bestBlendForColour(
+    const best = opts.mappingStrategy === "ratdoux" && isRatdouxReady()
+      ? ratdouxBestBlend(p.rgb, blendCandidates, opts.colourDifferenceMetric)
+      : bestBlendForColour(
       p.rgb,
       blendCandidates,
       opts.accentProtection,
